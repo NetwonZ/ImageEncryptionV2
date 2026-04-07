@@ -264,23 +264,11 @@ class Chaotic1DSystem:
 
 
 if __name__ == "__main__":
-	system = Chaotic1DSystem(params={"A": 3.7, "B": 0.6, "mu": 0.8, "a": 1.2})
-	lyap = system.lyapunov_exponent(x0=0.123456, n=1000, discard=500)
-	print("Estimated Lyapunov exponent =", lyap)
 
-	mu_values = np.linspace(0, 5, 80)
-	scan_mu, scan_lyap = system.lyapunov_parameter_scan(
-		parameter="mu",
-		values=mu_values,
-		x0=0.5,
-		n=1000,
-		discard=500,
-	)
-	print("Mu scan [mu, lyapunov] =")
-	print(np.column_stack((scan_mu, scan_lyap)))
 
 	def logistic_map(x: sp.Symbol, p: dict[str, sp.Symbol]) -> sp.Expr:
 		return p["r"] * x * (1 - x)
+
 
 	system_logistic = Chaotic1DSystem(params={"r": 3.6}, map_expr_builder=logistic_map)
 	r_values = np.linspace(2.8, 4.0, 160)
