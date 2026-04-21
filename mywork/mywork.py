@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from pathlib import Path
 
 import numpy as np
 import sympy as sp
@@ -154,12 +155,42 @@ class CMLSystem:
 
 		spectrum = log_sum / float(n)
 		return np.sort(spectrum)[::-1]
+		x0: np.ndarray,
+		z0: float,
+		n: int,
+		discard: int = 100,
+		epsilon: float = 1e-12,
+	) -> np.ndarray:
+		"""Return full Lyapunov spectrum (length L) in descending order."""
+		x = np.asarray(x0, dtype=float).copy()
+		z = float(z0)
+
+		Q = np.eye(self.L, dtype=float)
+		log_sum = np.zeros(self.L, dtype=float)
+
+		total_steps = discard + n
+		for step_idx in range(total_steps):
+			J = self._jacobian_x(x, z)
+			Z = J @ Q
+			Q, R = np.linalg.qr(Z)
+
+			if step_idx >= discard:
+				d = np.abs(np.diag(R))
+				log_sum += np.log(d + epsilon)
+
+			x, z = self.step(x, z)
+
+		spectrum = log_sum / float(n)
+		return np.sort(spectrum)[::-1]
 
 	@staticmethod
 	def ked_keb(spectrum: np.ndarray) -> tuple[float, float]:
 		"""Compute KED and KEB from one Lyapunov spectrum vector.
+	def ked_keb(spectrum: np.ndarray) -> tuple[float, float]:
+		"""Compute KED and KEB from one Lyapunov spectrum vector.
 
 		Args:
+			spectrum: 1D array, e.g. spectra[i, j, :] with length L.
 			spectrum: 1D array, e.g. spectra[i, j, :] with length L.
 
 		Returns:
@@ -185,9 +216,38 @@ class CMLSystem:
 		if self.eta == 0:
 			self.xi = self.L
 		self._build_neighbor_indices()
+			(ked, keb)
+		 """
+		lam = np.asarray(spectrum, dtype=float).reshape(-1)
+		positive = lam[lam > 0.0]
+		N = lam.size
+
+		ked = float(np.sum(positive) / N)
+		keb = float(positive.size / N)
+		return ked, keb
+
+	def _set_param_value(self, name: str, value: float) -> None:
+		if name in ("xi", "eta"):
+			setattr(self, name, int(value))
+		else:
+			setattr(self, name, float(value))
+
+	def _sync_index_rule(self) -> None:
+		if self.xi == 0:
+			self.eta = self.L
+		if self.eta == 0:
+			self.xi = self.L
+		self._build_neighbor_indices()
 
 	def lyap_scan(
+	def lyap_scan(
 		self,
+		param1: str,
+		values1: np.ndarray,
+		param2: str,
+		values2: np.ndarray,
+		x0: np.ndarray,
+		z0: float,
 		param1: str,
 		values1: np.ndarray,
 		param2: str,
@@ -200,8 +260,35 @@ class CMLSystem:
 		save_path: str = "mywork/output/cml_lyapunov_scan.npz",
 	) -> np.ndarray:
 		"""Scan two parameters and save all Lyapunov spectra for every combination.
+		save_path: str = "mywork/output/cml_lyapunov_scan.npz",
+	) -> np.ndarray:
+		"""Scan two parameters and save all Lyapunov spectra for every combination.
 
 		Returns:
+			spectra: shape = (len(values1), len(values2), L)
+		 """
+		path = Path(save_path)
+		path.parent.mkdir(parents=True, exist_ok=True)
+
+		if path.exists():
+			print(f"[scan] File already exists: {path}")
+			while True:
+				choice = input("Choose action: [s]kip / [d]elete and rescan: ").strip().lower()
+				if choice in ("s", "skip"):
+					print("[scan] Skip current scan. Loading existing spectra from file.")
+					with np.load(path) as existing:
+						if "spectra" not in existing:
+							raise KeyError(f"'spectra' not found in existing file: {path}")
+						return np.asarray(existing["spectra"], dtype=float)
+				if choice in ("d", "delete"):
+					path.unlink()
+					print("[scan] Existing file deleted. Start new scan.")
+					break
+				print("Invalid input. Please type 's' or 'd'.")
+
+		v1 = np.asarray(values1, dtype=float)
+		v2 = np.asarray(values2, dtype=float)
+		spectra = np.empty((v1.size, v2.size, self.L), dtype=float)
 			spectra: shape = (len(values1), len(values2), L)
 		 """
 		path = Path(save_path)
@@ -253,7 +340,34 @@ class CMLSystem:
 					self._set_param_value(param2, float(p2))
 					self._sync_index_rule()
 					spectra[i, j, :] = self.lyapunov_spectrum(
+		original = {
+			"mu": self.mu,
+			"lam": self.lam,
+			"a": self.a,
+			"b": self.b,
+			"xi": self.xi,
+			"eta": self.eta,
+		}
+		ked = np.empty((v1.size, v2.size), dtype=float)
+		keb = np.empty((v1.size, v2.size), dtype=float)
+
+		total = int(v1.size * v2.size)
+		with Progress(
+			TextColumn("[bold cyan]{task.description}"),
+			BarColumn(),
+			TaskProgressColumn(),
+			TimeElapsedColumn(),
+			TimeRemainingColumn(),
+		) as progress:
+			task = progress.add_task(f"Scanning {param1} x {param2}", total=total)
+			for i, p1 in enumerate(v1):
+				for j, p2 in enumerate(v2):
+					self._set_param_value(param1, float(p1))
+					self._set_param_value(param2, float(p2))
+					self._sync_index_rule()
+					spectra[i, j, :] = self.lyapunov_spectrum(
 						x0=x0,
+						z0=z0,
 						z0=z0,
 						n=n,
 						discard=discard,
@@ -512,10 +626,264 @@ class CMLSystem:
 		plt.title(f"Bifurcation Diagram for {param_name} at Lattice Index {lattice_index}")
 		plt.xlabel(param_name)
 		plt.ylabel(f"State at Index {lattice_index}")
+					ked_, keb_ = self.ked_keb(spectra[i, j, :])
+					ked[i, j] = ked_
+					keb[i, j] = keb_
+					progress.update(task, advance=1)
+
+
+		for key, value in original.items():
+			setattr(self, key, value)
+		self._sync_index_rule()
+
+		np.savez_compressed(
+			path,
+			spectra=spectra,
+			ked=ked,
+			keb=keb,
+   			param1_name=param1,
+			param2_name=param2,
+			param1_values=v1,
+			param2_values=v2,
+		)
+		return spectra
+
+	def plot_ked_keb(self, data_path: str) -> None:
+
+		"""Load saved scan data and plot KED/KEB 3D surfaces."""
+		import matplotlib.pyplot as plt
+
+		data = np.load(data_path)
+		ked = np.asarray(data["ked"], dtype=float)
+		keb = np.asarray(data["keb"], dtype=float)
+		v1 = np.asarray(data["param1_values"], dtype=float)
+		v2 = np.asarray(data["param2_values"], dtype=float)
+
+		p1_name = str(data["param1_name"])
+		p2_name = str(data["param2_name"])
+
+		X, Y = np.meshgrid(v1, v2, indexing="ij")
+		ked_max = float(np.nanmax(ked)) if ked.size else 0.0
+		if not np.isfinite(ked_max) or ked_max <= 0.0:
+			ked_max = 1e-12
+
+		fig = plt.figure(figsize=(14, 6))
+
+		ax1 = fig.add_subplot(1, 2, 1, projection="3d")
+		surf1 = ax1.plot_surface(X, Y, ked, cmap="viridis", linewidth=0, antialiased=True)
+		ax1.set_title("KED 3D Surface")
+		ax1.set_xlabel(p1_name)
+		ax1.set_ylabel(p2_name)
+		ax1.set_zlabel("KED")
+		ax1.set_zlim(0.0, ked_max)
+		fig.colorbar(surf1, ax=ax1, shrink=0.65, pad=0.08)
+
+		ax2 = fig.add_subplot(1, 2, 2, projection="3d")
+		surf2 = ax2.plot_surface(X, Y, keb, cmap="plasma", linewidth=0, antialiased=True)
+		ax2.set_title("KEB 3D Surface")
+		ax2.set_xlabel(p1_name)
+		ax2.set_ylabel(p2_name)
+		ax2.set_zlabel("KEB")
+		ax2.set_zlim(0.0, 1.2)
+		fig.colorbar(surf2, ax=ax2, shrink=0.65, pad=0.08)
+
+		plt.tight_layout()
+		plt.show()
+
+	def generate_random_bits_file(
+    self,
+    n_bits: int,
+    save_path: str = "mywork/output/cml_random.bin",
+    x0: np.ndarray | None = None,
+    z0: float | None = None,
+    warmup: int = 200,
+    threshold: float = 0.5,
+    channel_index: int = 0,
+    bitorder: str = "little",
+    seed: int | None = None,
+) -> Path:
+
+
+		path = Path(save_path)
+		path.parent.mkdir(parents=True, exist_ok=True)
+
+		if path.exists():
+			print(f"[prng] File already exists: {path}")
+			while True:
+				choice = input("Choose action: [s]kip / [d]elete and regenerate: ").strip().lower()
+				if choice in ("s", "skip"):
+					print("[prng] Skip generation and keep existing file.")
+					return path
+				if choice in ("d", "delete"):
+					path.unlink()
+					print("[prng] Existing file deleted. Start generating.")
+					break
+				print("Invalid input. Please type 's' or 'd'.")
+
+		print(f"当前的参数设置：{self._show_params()}")
+		rng = np.random.default_rng(seed)
+
+		if x0 is None or z0 is None:
+			raise ValueError("Both x0 and z0 must be provided as initial conditions for the CML system.")
+		# Burn-in to reduce initial transient effect.
+		x = np.asarray(x0, dtype=float).copy()
+		z = float(z0)
+		for _ in range(max(0, int(warmup))):
+			x, z = self.step(x, z)
+
+
+
+		steps = (n_bits + self.L - 1) // self.L
+		bits = np.empty(steps * self.L, dtype=np.uint8)
+		pos = 0
+		onecount = 0
+		zerocout = 0
+  
+		# output = np.empty((steps, self.L), dtype=np.float32)
+  
+		for i in range(steps):
+			x, z = self.step(x, z)
+   
+			# output[i, :] = x.astype(np.float32)
+   
+			row_bits = (x >= threshold).astype(np.uint8)   # 一次拿 L 个 bit
+			onecount += np.sum(row_bits)
+			zerocout += np.sum(1 - row_bits)
+			bits[pos:pos + self.L] = row_bits	
+			pos += self.L
+			if i%1000 == 0:
+				print(f"[rng] Step {i}/{steps} - Generated {pos} bits so far...")
+		print(f"[rng] Total ones: {onecount}, Total zeros: {zerocout}, Ratio: {onecount/(zerocout+1e-12):.4f}")
+		bits = bits[:n_bits]
+  
+		#将output保存成csv在本地用于数据分析
+		# np.savetxt("mywork/output/cml_random_output.csv", output, delimiter=",")
+  
+		# Pack bits to bytes and write binary file.
+		pad = (-n_bits) % 8
+		if pad:
+			bits = np.pad(bits, (0, pad), mode="constant", constant_values=0)
+
+		packed = np.packbits(bits, bitorder=bitorder)
+		path.write_bytes(packed.tobytes())
+
+		print(f"[rng] Generated {n_bits} bits -> {packed.size} bytes")
+		print(f"[rng] Saved to: {path}")
+		return path
+
+	def vis_states(self,x0,z0,x1,z1,lat_index,steps,view = True):
+		x = np.asarray(x0, dtype=float).copy()
+		z = float(z0)
+		x_ = np.asarray(x1, dtype=float).copy()
+		z_ = float(z1)
+		states = np.empty((steps, self.L), dtype=float)
+		states_ = np.empty((steps, self.L), dtype=float)
+		for i in range(steps):
+			states[i, :] = x
+			states_[i, :] = x_
+			x, z = self.step(x, z)
+			x_, z_ = self.step(x_, z_)
+		import matplotlib.pyplot as plt
+		#将两个不同初始状态下的	lat_index位置绘制在同一张图上，展示它们的演化轨迹
+		if view:
+			print("drawing states...")
+			plt.figure(figsize=(10, 6))
+			plt.plot(states[:, lat_index], label="State 1", alpha=0.7)
+			plt.plot(states_[:, lat_index], label="State 2", alpha=0.7)
+			#在额外绘制一条线，表示两个状态的差值的绝对值，展示它们的分叉情况
+			diff = np.abs(states[:, lat_index] - states_[:, lat_index])
+			plt.plot(diff, label="Absolute Difference", color="red", linestyle="--", alpha=0.7)
+			plt.title(f"Evolution of Lattice Index {lat_index}")
+			plt.xlabel("Time Step")
+			plt.ylabel("State Value")	
+			plt.legend()
+			plt.grid()
+			plt.tight_layout()
+			plt.show()
+		return states, states_
+
+	def Bifurcation_diagram(
+		self,
+		x0,
+		z0,
+		lattice_index,
+		param_name,
+		param_range,
+		steps=2000,
+		discard=1000,
+	):
+		import matplotlib.pyplot as plt
+
+		if not hasattr(self, param_name):
+			raise ValueError(f"Unknown parameter: {param_name}")
+		if not (0 <= int(lattice_index) < self.L):
+			raise ValueError(f"lattice_index must be in [0, {self.L - 1}]")
+		if steps <= 0:
+			raise ValueError("steps must be > 0")
+		if discard < 0:
+			raise ValueError("discard must be >= 0")
+		x0 = np.asarray(x0, dtype=float).copy()
+		z0 = float(z0)
+		if x0.size != self.L:
+			raise ValueError(f"x0 length must equal L={self.L}")
+		param_values = np.asarray(param_range, dtype=float).reshape(-1)
+		if param_values.size == 0:
+			raise ValueError("param_range is empty")
+
+		# 每个参数值收集 steps 个稳态后采样点，用于散点图
+		x_scatter = np.repeat(param_values, steps)
+		y_scatter = np.empty(param_values.size * steps, dtype=float)
+		pos = 0
+
+		with Progress(
+			TextColumn("[bold cyan]{task.description}"),
+			BarColumn(),
+			TaskProgressColumn(),
+			TimeElapsedColumn(),
+			TimeRemainingColumn(),
+		) as progress:
+			task = progress.add_task(
+				f"Bifurcation scan: {param_name}",
+				total=int(param_values.size),
+			)
+
+			for p in param_values:
+				self._set_param_value(param_name, float(p))
+				self._sync_index_rule()
+
+				x = x0.copy()
+				z = z0
+
+				for _ in range(discard):
+					x, z = self.step(x, z)
+
+				for _ in range(steps):
+					x, z = self.step(x, z)
+					y_scatter[pos] = x[int(lattice_index)]
+					pos += 1
+
+				progress.update(task, advance=1)
+
+		# 恢复原始参数，避免影响后续流程
+		self._reset_params()
+
+		plt.figure(figsize=(10, 6))
+		plt.plot(
+			x_scatter,
+			y_scatter,
+			marker=".",
+			linestyle="",
+			markersize=1.0,
+			alpha=0.35,
+		)
+		plt.title(f"Bifurcation Diagram for {param_name} at Lattice Index {lattice_index}")
+		plt.xlabel(param_name)
+		plt.ylabel(f"State at Index {lattice_index}")
 		plt.grid(True, alpha=0.3)
 		plt.tight_layout()
 		plt.show()
 
+		return x_scatter, y_scatter
 		return x_scatter, y_scatter
 
 if __name__ == "__main__":
